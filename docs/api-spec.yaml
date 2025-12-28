@@ -1,0 +1,896 @@
+openapi: 3.0.3
+info:
+  title: Document Management System API
+  description: |
+    Cloud-based multi-tenant Document Management System providing secure document upload, 
+    storage, rule-based processing, and full-text search capabilities.
+    
+    ## Authentication
+    All API requests require a valid JWT token in the Authorization header:
+    ```
+    Authorization: Bearer <jwt_token>
+    ```
+    
+    ## Rate Limiting
+    - Standard tier: 100 requests/minute per tenant
+    - Premium tier: 1000 requests/minute per tenant
+    
+    ## Error Handling
+    All errors follow a consistent format with machine-readable codes and human-readable messages.
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: api-support@example.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.dms.example.com/api/v1
+    description: Production
+  - url: https://api-staging.dms.example.com/api/v1
+    description: Staging
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Documents
+    description: Document upload, download, and metadata operations
+  - name: Search
+    description: Full-text search across documents
+  - name: Processing
+    description: Processing rules and job management
+  - name: Deletion
+    description: Document deletion and retention management
+  - name: Legal Hold
+    description: Legal hold management
+
+paths:
+  /documents/init-upload:
+    post:
+      tags:
+        - Documents
+      summary: Initiate document upload
+      description: |
+        Creates a document metadata record and generates a pre-signed URL for direct S3 upload.
+        The pre-signed URL expires in 15 minutes.
+      operationId: initUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - fileName
+                - mimeType
+                - size
+              properties:
+                fileName:
+                  type: string
+                  description: Name of the file to upload
+                  example: contract-2024.pdf
+                  minLength: 1
+                  maxLength: 255
+                mimeType:
+                  type: string
+                  description: MIME type of the file
+                  example: application/pdf
+                  enum:
+                    - application/pdf
+                    - image/jpeg
+                    - image/png
+                    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+                    - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+                size:
+                  type: integer
+                  description: File size in bytes
+                  example: 1048576
+                  minimum: 1
+                  maximum: 524288000
+      responses:
+        '200':
+          description: Upload initiated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documentId:
+                    type: string
+                    format: uuid
+                    description: Unique document identifier
+                  uploadUrl:
+                    type: string
+                    format: uri
+                    description: Pre-signed S3 URL for upload
+                  expiresAt:
+                    type: string
+                    format: date-time
+                    description: URL expiration timestamp
+              example:
+                documentId: 550e8400-e29b-41d4-a716-446655440000
+                uploadUrl: https://s3.amazonaws.com/bucket/path?signature=...
+                expiresAt: '2024-01-15T10:30:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents/{id}:
+    get:
+      tags:
+        - Documents
+      summary: Get document metadata
+      description: Retrieves document metadata including all versions and processing status
+      operationId: getDocument
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Document ID
+      responses:
+        '200':
+          description: Document metadata retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents:
+    get:
+      tags:
+        - Documents
+      summary: List documents
+      description: Lists documents with pagination and filtering
+      operationId: listDocuments
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [UPLOADING, UPLOADED, PROCESSING, READY, FAILED]
+          description: Filter by document status
+        - name: owner
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by owner user ID
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter documents created after this date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter documents created before this date
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Number of results per page
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of results to skip
+      responses:
+        '200':
+          description: Documents retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Document'
+                  total:
+                    type: integer
+                    description: Total number of documents matching filters
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents/{id}/download:
+    get:
+      tags:
+        - Documents
+      summary: Get download URL
+      description: Generates a time-limited pre-signed URL for document download (15 minute expiration)
+      operationId: getDownloadUrl
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Document ID
+        - name: versionId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Specific version ID (defaults to latest)
+      responses:
+        '200':
+          description: Download URL generated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  downloadUrl:
+                    type: string
+                    format: uri
+                    description: Pre-signed S3 URL for download
+                  expiresAt:
+                    type: string
+                    format: date-time
+                    description: URL expiration timestamp
+                  fileName:
+                    type: string
+                    description: Original file name
+                  mimeType:
+                    type: string
+                    description: File MIME type
+                  sizeBytes:
+                    type: integer
+                    description: File size in bytes
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents/search:
+    get:
+      tags:
+        - Search
+      summary: Search documents
+      description: |
+        Full-text search across document names and extracted content.
+        Results are filtered by tenant and ranked by relevance.
+      operationId: searchDocuments
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: Search query
+          example: contract agreement 2024
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Number of results to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of results to skip
+      responses:
+        '200':
+          description: Search completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SearchResult'
+                  total:
+                    type: integer
+                    description: Total number of matching documents
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents/{id}:
+    delete:
+      tags:
+        - Deletion
+      summary: Delete document
+      description: |
+        Performs soft delete by marking document as DELETED.
+        Data remains in storage until retention period expires.
+      operationId: deleteDocument
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Document ID
+      responses:
+        '200':
+          description: Document soft deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [soft_deleted]
+                  deletedAt:
+                    type: string
+                    format: date-time
+                  retentionDays:
+                    type: integer
+                    description: Days until hard delete
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Document has legal hold
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents/{id}/permanent-delete:
+    post:
+      tags:
+        - Deletion
+      summary: Permanently delete document
+      description: |
+        Immediately deletes document and all derived artifacts, bypassing retention period.
+        Requires elevated permissions and explicit confirmation.
+      operationId: permanentDelete
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Document ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - confirmation
+              properties:
+                confirmation:
+                  type: string
+                  description: Must be "PERMANENT_DELETE" to confirm
+                  enum: [PERMANENT_DELETE]
+      responses:
+        '200':
+          description: Document permanently deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [deleting]
+                  message:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Document has legal hold
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /documents/{id}/legal-hold:
+    put:
+      tags:
+        - Legal Hold
+      summary: Set legal hold
+      description: Prevents document deletion regardless of retention policy
+      operationId: setLegalHold
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Document ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - legalHold
+              properties:
+                legalHold:
+                  type: boolean
+                  description: Enable or disable legal hold
+                reason:
+                  type: string
+                  description: Reason for legal hold
+                  maxLength: 500
+      responses:
+        '200':
+          description: Legal hold updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documentId:
+                    type: string
+                    format: uuid
+                  legalHold:
+                    type: boolean
+                  updatedAt:
+                    type: string
+                    format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /processing-rules:
+    get:
+      tags:
+        - Processing
+      summary: List processing rules
+      description: Retrieves all processing rules for the authenticated tenant
+      operationId: listProcessingRules
+      responses:
+        '200':
+          description: Processing rules retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProcessingRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - Processing
+      summary: Create processing rule
+      description: Creates a new processing rule for the authenticated tenant
+      operationId: createProcessingRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProcessingRuleInput'
+      responses:
+        '201':
+          description: Processing rule created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /processing-rules/{id}:
+    put:
+      tags:
+        - Processing
+      summary: Update processing rule
+      description: Updates an existing processing rule
+      operationId: updateProcessingRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Processing rule ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProcessingRuleInput'
+      responses:
+        '200':
+          description: Processing rule updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      tags:
+        - Processing
+      summary: Delete processing rule
+      description: Deletes a processing rule
+      operationId: deleteProcessingRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Processing rule ID
+      responses:
+        '204':
+          description: Processing rule deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from authentication endpoint
+
+  schemas:
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        ownerId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [UPLOADING, UPLOADED, PROCESSING, READY, FAILED, DELETED, DELETING]
+        legalHold:
+          type: boolean
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+        retentionDays:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentVersion'
+
+    DocumentVersion:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+        s3Key:
+          type: string
+        s3Bucket:
+          type: string
+        sha256:
+          type: string
+        sizeBytes:
+          type: integer
+        mimeType:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    SearchResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        ownerId:
+          type: string
+          format: uuid
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        relevanceScore:
+          type: number
+          format: float
+          description: Search relevance score
+        excerpt:
+          type: string
+          description: Text excerpt showing match context
+
+    ProcessingRule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        mimeTypePattern:
+          type: string
+          description: MIME type pattern (supports wildcards)
+          example: application/pdf
+        rules:
+          type: object
+          properties:
+            ocr:
+              type: boolean
+              description: Enable OCR text extraction
+            thumbnail:
+              type: object
+              properties:
+                sizes:
+                  type: array
+                  items:
+                    type: integer
+                  description: Thumbnail sizes in pixels
+                  example: [100, 300]
+            pdfSplit:
+              type: boolean
+              description: Split PDF into individual pages
+            malwareScan:
+              type: boolean
+              description: Scan for malware
+        createdAt:
+          type: string
+          format: date-time
+
+    ProcessingRuleInput:
+      type: object
+      required:
+        - mimeTypePattern
+        - rules
+      properties:
+        mimeTypePattern:
+          type: string
+          description: MIME type pattern (supports wildcards)
+          example: application/pdf
+        rules:
+          type: object
+          properties:
+            ocr:
+              type: boolean
+            thumbnail:
+              type: object
+              properties:
+                sizes:
+                  type: array
+                  items:
+                    type: integer
+            pdfSplit:
+              type: boolean
+            malwareScan:
+              type: boolean
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - requestId
+            - timestamp
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code
+              example: FORBIDDEN
+            message:
+              type: string
+              description: Human-readable error message
+              example: You do not have permission to access this resource
+            details:
+              type: object
+              description: Additional error context
+            requestId:
+              type: string
+              format: uuid
+              description: Request ID for support/debugging
+            timestamp:
+              type: string
+              format: date-time
+              description: Error timestamp
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: BAD_REQUEST
+              message: Invalid request parameters
+              details:
+                field: fileName
+                issue: must not be empty
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+              timestamp: '2024-01-15T10:00:00Z'
+
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Invalid or expired authentication token
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+              timestamp: '2024-01-15T10:00:00Z'
+
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: FORBIDDEN
+              message: You do not have permission to access this resource
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+              timestamp: '2024-01-15T10:00:00Z'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: NOT_FOUND
+              message: Document not found
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+              timestamp: '2024-01-15T10:00:00Z'
+
+    PayloadTooLarge:
+      description: File size exceeds maximum allowed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: PAYLOAD_TOO_LARGE
+              message: File size exceeds maximum allowed (500MB)
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+              timestamp: '2024-01-15T10:00:00Z'
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: INTERNAL_SERVER_ERROR
+              message: An unexpected error occurred
+              requestId: 550e8400-e29b-41d4-a716-446655440000
+              timestamp: '2024-01-15T10:00:00Z'
