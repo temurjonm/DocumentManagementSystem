@@ -1,59 +1,58 @@
 name: Deploy
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production
+    environment: ${{ github.event.inputs.environment }}
     
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
       
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Build
-        run: npm run build
-      
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.6.0
+          terraform_version: '1.6'
       
-      - name: Terraform Init
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - run: npm ci
+      
+      - run: npm run build
+      
+      - run: npm run package:lambda
+      
+      - name: Terraform init
+        working-directory: terraform
         run: terraform init
-        working-directory: ./terraform
       
-      - name: Terraform Apply
-        run: terraform apply -auto-approve -var="environment=prod" -var="bucket_name_prefix=dms-prod"
-        working-directory: ./terraform
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: us-east-1
-      
-      - name: Deploy Lambda Functions
+      - name: Terraform plan
+        working-directory: terraform
         run: |
-          for dir in dist/api/*; do
-            if [ -d "$dir" ]; then
-              cd "$dir"
-              zip -r function.zip .
-              aws lambda update-function-code \
-                --function-name $(basename "$dir") \
-                --zip-file fileb://function.zip
-              cd -
-            fi
-          done
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: us-east-1
+          terraform plan \
+            -var="environment=${{ github.event.inputs.environment }}" \
+            -var="bucket_name_prefix=dms-documents" \
+            -out=tfplan
+      
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply tfplan
